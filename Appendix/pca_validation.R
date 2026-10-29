@@ -1,1095 +1,373 @@
-# ==============================================================================
-# Pairwise Correlations Among Fragility Components
-# V-Dem and WGI versions
-# ==============================================================================
 # Author: Cedric Antunes (FGV-CEPESP) ------------------------------------------
-# Date: May, 2026 --------------------------------------------------------------
+# Date: August 2026 (WGI estimates added October 2026) -------------------------
+#
+# Purpose: Pearson correlation for state capacity and fragility: V-Dem full and
+# no-rule-of-law indices, and WGI full and no-rule-of-law indices. Figures are
+# pooled, year-adjusted, and country/year-adjusted Pearson r. Each index family
+# (V-Dem, WGI) uses its own complete-case sample, shared by its full and
+# no-rule-of-law indices and by all specifications. The V-Dem sample is
+# therefore unchanged by the addition of WGI, which only starts in 1996.
+# 95% percentile intervals: pairs bootstrap of entire country histories.
+# Pooled Spearman rho is exported as a sensitivity check, on the same sample.
 
-# Assumes standardized_data_final is loaded
+# Settings ---------------------------------------------------------------------
+YEAR_MIN <- 1971L
+YEAR_MAX <- 2022L
+BOOT_REPS <- 2000L
+BOOT_SEED <- 20260909L
+CONF_LEVEL <- 0.95
+OUTPUT_DIR <- "state_capacity_fragility_vdem_outputs"
 
-# Required packages ------------------------------------------------------------
+# Explicit orientation: -1 assumes the supplied raw index is higher = LESS fragile
+FRAGILITY_MULTIPLIER <- c(vdem_full = -1, vdem_norl = -1,
+                          wgi_full = -1, wgi_norl = -1)
+CAPACITY_MULTIPLIER <- 1  # STATE_CAPACITY is higher = greater capacity.
+
+# Index families. Each family is estimated on its own shared complete-case sample.
+INDEX_FAMILIES <- list(
+  vdem = list(label = "V-Dem", outcomes = c("vdem_full", "vdem_norl")),
+  wgi  = list(label = "WGI",   outcomes = c("wgi_full", "wgi_norl"))
+)
+
+# Packages ---------------------------------------------------------------------
 suppressPackageStartupMessages({
-  library(tidyverse)
-  library(scales)
-  library(knitr)
-  library(jsonlite)
-  library(httr2)
-  library(vdemdata)
-  library(WDI)
-})
-
-# ------------------------------------------------------------------------------
-# Loading V-Dem data -----------------------------------------------------------
-# ------------------------------------------------------------------------------
-vdem_raw <- vdemdata::vdem
-
-# ------------------------------------------------------------------------------
-# Required variables -----------------------------------------------------------
-# ------------------------------------------------------------------------------
-required_main_vars <- c(
-  "COUNTRY_NAME",
-  "ISO_CODE_3",
-  "YEAR",
-  "VDEM_FRAGILE_IDEAL",
-  "WGI_FRAGILE_IDEAL"
+  library(fixest)
+  library(ggplot2)
+}
 )
 
-required_vdem_vars <- c(
-  "country_text_id",
-  "country_name",
-  "year",
-  "v2x_corr",
-  "v2caviol",
-  "v2x_rule",
-  "v2clrspct"
+# Data dependency --------------------------------------------------------------
+# `standardized_data_final` must already be in the environment (country-year
+# panel with ISO_CODE_3, YEAR, STATE_CAPACITY, and the V-Dem and WGI fragility
+# indices). Load it here if running standalone, e.g.:
+# standardized_data_final <- readRDS("standardized_data_final.RDS")
+stopifnot(exists("standardized_data_final"))
+
+stopifnot(YEAR_MIN <= YEAR_MAX, BOOT_REPS >= 100L,
+          BOOT_REPS == as.integer(BOOT_REPS),
+          CONF_LEVEL > 0, CONF_LEVEL < 1,
+          identical(names(FRAGILITY_MULTIPLIER),
+                    unlist(lapply(INDEX_FAMILIES, `[[`, "outcomes"), use.names = FALSE)),
+          all(FRAGILITY_MULTIPLIER %in% c(-1, 1)),
+          CAPACITY_MULTIPLIER %in% c(-1, 1))
+
+source_vars <- c(
+  state_capacity = "STATE_CAPACITY",
+  vdem_full = "NEW_VDEM_LOADING_FACTOR_1_NORMALIZED.y",
+  vdem_norl = "NEW_VDEM_NORL_LOADING_FACTOR_1_NORMALIZED",
+  wgi_full = "WGI_LOADING_FACTOR_1_NORMALIZED",
+  wgi_norl = "WGI_NORL_LOADING_FACTOR_1_NORMALIZED"
 )
 
-# ------------------------------------------------------------------------------
-# Helpers ----------------------------------------------------------------------
-# ------------------------------------------------------------------------------
-rescale01 <- function(x) {
-  x_nonmiss <- x[!is.na(x)]
-  
-  if (length(x_nonmiss) == 0) {
-    return(rep(NA_real_, length(x)))
-  }
-  
-  rng <- range(x_nonmiss)
-  
-  if (!all(is.finite(rng)) || diff(rng) == 0) {
-    return(rep(NA_real_, length(x)))
-  }
-  
-  (x - rng[1]) / diff(rng)
+src <- as.data.frame(standardized_data_final)
+for (v in unname(source_vars)) {
+  if (!v %in% names(src)) stop(v, " is missing from standardized_data_final.")
+  if (!is.numeric(src[[v]])) stop(v, " must be numeric; inspect its import first.")
 }
 
-safe_cor <- function(x, y) {
-  cc <- complete.cases(x, y)
-  
-  if (sum(cc) < 10) {
-    return(NA_real_)
-  }
-  
-  suppressWarnings(
-    cor(x[cc], y[cc], use = "complete.obs")
+year_num <- suppressWarnings(as.numeric(as.character(src$YEAR)))
+if (any(!is.na(src$YEAR) & (!is.finite(year_num) | year_num != trunc(year_num)))) {
+  stop("YEAR contains invalid or non-integer values.")
+}
+
+d_all <- data.frame(
+  source_row = seq_len(nrow(src)),
+  iso3 = trimws(as.character(src$ISO_CODE_3)),
+  year = as.integer(year_num),
+  state_capacity = src[[source_vars[["state_capacity"]]]] * CAPACITY_MULTIPLIER
+)
+for (v in names(FRAGILITY_MULTIPLIER)) {
+  d_all[[v]] <- src[[source_vars[[v]]]] * FRAGILITY_MULTIPLIER[[v]]
+}
+
+valid_keys <- !is.na(d_all$iso3) & nzchar(d_all$iso3) & !is.na(d_all$year)
+in_period <- valid_keys & !is.na(d_all$year) & d_all$year >= YEAR_MIN & d_all$year <= YEAR_MAX
+in_period[is.na(in_period)] <- FALSE
+period_data <- d_all[in_period, , drop = FALSE]
+
+dup <- duplicated(period_data[c("iso3", "year")]) |
+  duplicated(period_data[c("iso3", "year")], fromLast = TRUE)
+
+# Optional sign diagnostics, run on each family's analysis sample.
+# Assumes *_FRAGILE_IDEAL is coded 1 = fragile, 0 = otherwise.
+binary_vars <- c(vdem_full = "VDEM_FRAGILE_IDEAL",
+                 vdem_norl = "VDEM_NORL_FRAGILE_IDEAL",
+                 wgi_full = "WGI_FRAGILE_IDEAL",
+                 wgi_norl = "WGI_NORL_FRAGILE_IDEAL")
+
+# ------------------------------------------------------------------------------
+# Estimation helpers -----------------------------------------------------------
+# ------------------------------------------------------------------------------
+adjustments <- c("pooled", "year", "country_year")
+
+make_specs <- function(outcomes) {
+  specs <- expand.grid(outcome = outcomes, adjustment = adjustments,
+                       stringsAsFactors = FALSE)
+  specs$method <- "pearson"
+  specs <- rbind(specs, data.frame(outcome = outcomes, adjustment = "pooled",
+                                   method = "spearman"))
+  specs$id <- paste(specs$method, specs$adjustment, specs$outcome, sep = "__")
+  specs
+}
+
+safe_cor <- function(x, y, method = "pearson") {
+  # Residuals can be numerically zero when a resample has no identifying variation.
+  if (length(x) < 3L || any(!is.finite(x)) || any(!is.finite(y)) ||
+      stats::sd(x) < 1e-10 || stats::sd(y) < 1e-10) return(NA_real_)
+  unname(stats::cor(x, y, method = method))
+}
+
+estimate_all <- function(data, country_id, measure_cols, specs) {
+  X <- as.matrix(data[measure_cols])
+  # Joint demeaning preserves row alignment and uses the same sample for all columns.
+  # In an unbalanced panel, country/year adjustment is NOT simple double subtraction.
+  year_resid <- fixest::demean(
+    X, f = list(data$year), as.matrix = TRUE, nthreads = 1,
+    tol = 1e-10, iter = 10000, notes = FALSE
   )
+  country_year_resid <- fixest::demean(
+    X, f = list(country_id, data$year), as.matrix = TRUE, nthreads = 1,
+    tol = 1e-10, iter = 10000, notes = FALSE
+  )
+  # Demean is matrix-based, so singleton rows remain aligned (their within
+  # residuals can be zero). No independent-observation cor.test() is used.
+  matrices <- list(pooled = X, year = year_resid, country_year = country_year_resid)
+  ans <- vapply(seq_len(nrow(specs)), function(j) {
+    M <- matrices[[specs$adjustment[j]]]
+    k <- match(specs$outcome[j], measure_cols)
+    safe_cor(M[, 1L], M[, k], method = specs$method[j])
+  }, numeric(1))
+  stats::setNames(ans, specs$id)
 }
 
-orient_to_fragility <- function(x, fragile_binary) {
-  r <- safe_cor(x, fragile_binary)
-  
-  if (is.na(r)) return(x)
-  
-  # If negatively correlated with the fragile dummy,
-  # flip so higher values mean more fragility.
-  if (r < 0) -x else x
-}
+dir.create(OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
+file_out <- function(name) file.path(OUTPUT_DIR, name)
+alpha <- 1 - CONF_LEVEL
+FAMILY_COLOURS <- c(
+  "V-Dem" = "#8B1A1A",  # dark red, as in the original V-Dem figure
+  "WGI"   = "#1F3A5F"   # dark navy
+)
 
-make_correlation_matrix <- function(data, component_cols) {
-  data |>
-    select(all_of(component_cols)) |>
-    cor(
-      use = "pairwise.complete.obs",
-      method = "pearson"
-    )
-}
-
-lower_triangle_for_latex <- function(cor_mat, panel_label) {
-  cor_df <- as.data.frame(round(cor_mat, 3)) |>
-    rownames_to_column("Component")
+# ------------------------------------------------------------------------------
+# Run one index family on its own shared complete-case sample ------------------
+# ------------------------------------------------------------------------------
+run_family <- function(family) {
+  fam <- INDEX_FAMILIES[[family]]
+  outcomes <- fam$outcomes
+  measure_cols <- c("state_capacity", outcomes)
+  specs <- make_specs(outcomes)
   
-  component_names <- cor_df$Component
+  complete <- Reduce(`&`, lapply(period_data[measure_cols], is.finite))
+  d <- period_data[complete, c("source_row", "iso3", "year", measure_cols), drop = FALSE]
+  d <- d[order(d$iso3, d$year), , drop = FALSE]
+  rownames(d) <- NULL
+  G <- length(unique(d$iso3))
+  if (G < 3L || length(unique(d$year)) < 2L || nrow(d) < 10L) {
+    stop(fam$label, ": too few countries, years, or complete observations for this analysis.")
+  }
+  if (G < 30L) warning(fam$label, ": fewer than 30 countries; cluster-bootstrap intervals may be unstable.")
   
-  for (j in seq_along(component_names)) {
-    for (i in seq_len(nrow(cor_df))) {
-      if (j > i) {
-        cor_df[i, j + 1] <- NA
-      }
+  orientation_audit <- do.call(rbind, lapply(outcomes, function(v) {
+    binary_name <- binary_vars[[v]]
+    r <- NA_real_
+    n <- 0L
+    status <- "Binary unavailable; verify orientation from index construction"
+    if (binary_name %in% names(src)) {
+      b <- suppressWarnings(as.numeric(as.character(src[[binary_name]][d$source_row])))
+      ok <- is.finite(b) & b %in% c(0, 1)
+      n <- sum(ok)
+      if (n >= 10L && length(unique(b[ok])) == 2L && stats::sd(d[[v]][ok]) > 0) {
+        r <- stats::cor(d[[v]][ok], b[ok])
+        status <- "Checked against 1 = fragile binary"
+        if (r < 0) stop("Orientation mismatch for ", v,
+                        ": oriented index correlates negatively with ", binary_name,
+                        ". Verify index and binary coding, then set FRAGILITY_MULTIPLIER.")
+      } else status <- "Binary check inconclusive; verify documented orientation"
+    }
+    data.frame(outcome = v, multiplier = FRAGILITY_MULTIPLIER[[v]],
+               diagnostic_n = n, correlation_with_fragile_binary = r, status = status)
+  }))
+  
+  point_estimates <- estimate_all(d, d$iso3, measure_cols, specs)
+  if (any(!is.finite(point_estimates))) {
+    stop("Undefined correlation in the original sample: ",
+         paste(names(point_estimates)[!is.finite(point_estimates)], collapse = ", "),
+         ". Inspect residual variation.")
+  }
+  
+  # Country pairs bootstrap ----------------------------------------------------
+  # Draw G countries with replacement. Each selected history is copied intact.
+  # Repeated draws receive distinct country FE identifiers; original year labels
+  # remain unchanged. Re-estimate year and country/year effects in EVERY draw.
+  # The same draw is used for both indices of a family and all specifications.
+  # The seed is reset for each family, so V-Dem draws are identical to the
+  # V-Dem-only version of this script.
+  rows_by_country <- split(seq_len(nrow(d)), d$iso3)
+  set.seed(BOOT_SEED)
+  boot_estimates <- matrix(NA_real_, nrow = BOOT_REPS, ncol = nrow(specs),
+                           dimnames = list(NULL, specs$id))
+  message(sprintf("%s shared sample: %s country-years; %s countries; observed years %s-%s.",
+                  fam$label, nrow(d), G, min(d$year), max(d$year)))
+  for (b in seq_len(BOOT_REPS)) {
+    sampled <- sample.int(G, size = G, replace = TRUE)
+    row_blocks <- rows_by_country[sampled]
+    row_idx <- unlist(row_blocks, use.names = FALSE)
+    draw_country_id <- rep(seq_len(G), lengths(row_blocks))
+    boot_estimates[b, ] <- estimate_all(d[row_idx, , drop = FALSE], draw_country_id,
+                                        measure_cols, specs)
+    if (b %% 100L == 0L || b == BOOT_REPS) {
+      message(sprintf("%s bootstrap: %s / %s", fam$label, b, BOOT_REPS))
     }
   }
   
-  cor_df |>
-    mutate(
-      panel = panel_label,
-      across(
-        -c(Component, panel),
-        ~ if_else(is.na(.x), "", sprintf("%.3f", as.numeric(.x)))
-      )
-    )
-}
-
-# ------------------------------------------------------------------------------
-# Loading WGI data -------------------------------------------------------------
-# ------------------------------------------------------------------------------
-start_year <- min(standardized_data_final$YEAR, na.rm = TRUE)
-end_year   <- max(standardized_data_final$YEAR, na.rm = TRUE)
-
-# WGI covers 1996 onward.
-start_year_wgi <- max(start_year, 1996)
-end_year_wgi   <- min(end_year, 2024)
-
-wgi_indicators <- c(
-  wgi_control_corruption       = "CC.EST",
-  wgi_political_stability      = "PV.EST",
-  wgi_rule_of_law              = "RL.EST",
-  wgi_government_effectiveness = "GE.EST"
-)
-
-try_wdi_source <- function(source_id) {
-  tryCatch(
-    {
-      WDI::WDI(
-        country = "all",
-        indicator = wgi_indicators,
-        start = start_year_wgi,
-        end = end_year_wgi,
-        source = source_id,
-        extra = TRUE
-      )
-    },
-    error = function(e) {
-      message("WDI::WDI(source = ", source_id, ") failed.")
-      message("Original error: ", conditionMessage(e))
-      NULL
-    }
-  )
-}
-
-wgi_raw <- try_wdi_source(3)
-
-if (is.null(wgi_raw) || nrow(wgi_raw) == 0) {
-  wgi_raw <- try_wdi_source(75)
-}
-
-fetch_wb_indicator <- function(indicator_code, indicator_name, source_id,
-                               start_year, end_year) {
-  
-  fetch_page <- function(page) {
-    url <- paste0(
-      "https://api.worldbank.org/v2/country/all/indicator/",
-      indicator_code
-    )
-    
-    resp <- request(url) |>
-      req_url_query(
-        format = "json",
-        source = source_id,
-        date = paste0(start_year, ":", end_year),
-        per_page = 20000,
-        page = page
-      ) |>
-      req_perform()
-    
-    parsed <- fromJSON(
-      resp_body_string(resp),
-      flatten = TRUE
-    )
-    
-    if (length(parsed) < 2 || is.null(parsed[[2]])) {
-      return(tibble())
-    }
-    
-    as_tibble(parsed[[2]]) |>
-      transmute(
-        iso3c = as.character(countryiso3code),
-        country = as.character(country.value),
-        year = as.integer(date),
-        value = as.numeric(value)
-      ) |>
-      filter(
-        !is.na(iso3c),
-        iso3c != "",
-        !is.na(year)
-      )
+  # Results and coverage -------------------------------------------------------
+  settings <- list(index_family = fam$label, year_min = YEAR_MIN, year_max = YEAR_MAX,
+                   boot_reps = BOOT_REPS, seed = BOOT_SEED, confidence = CONF_LEVEL,
+                   fragility_multiplier = FRAGILITY_MULTIPLIER[outcomes],
+                   capacity_multiplier = CAPACITY_MULTIPLIER)
+  # Preserve draws even if a degenerate sample prevents reporting valid intervals.
+  saveRDS(list(specs = specs, estimates = boot_estimates, settings = settings),
+          file_out(sprintf("%s_state_capacity_bootstrap_draws.rds", family)))
+  valid_reps <- colSums(is.finite(boot_estimates))
+  if (any(valid_reps < ceiling(0.95 * BOOT_REPS))) {
+    stop(fam$label, ": more than 5% undefined bootstrap estimates in at least one ",
+         "specification. Draws saved for diagnosis; inspect residual variation ",
+         "before reporting CIs.")
   }
-  
-  url <- paste0(
-    "https://api.worldbank.org/v2/country/all/indicator/",
-    indicator_code
-  )
-  
-  first_resp <- request(url) |>
-    req_url_query(
-      format = "json",
-      source = source_id,
-      date = paste0(start_year, ":", end_year),
-      per_page = 20000,
-      page = 1
-    ) |>
-    req_perform()
-  
-  first_parsed <- fromJSON(
-    resp_body_string(first_resp),
-    flatten = TRUE
-  )
-  
-  if (length(first_parsed) < 2 || is.null(first_parsed[[2]])) {
-    warning(
-      "No data returned for indicator ",
-      indicator_code,
-      " from source ",
-      source_id
-    )
-    
-    return(tibble(
-      iso3c = character(),
-      country = character(),
-      year = integer(),
-      !!indicator_name := numeric()
-    ))
+  if (any(valid_reps < BOOT_REPS)) {
+    warning(fam$label, ": some bootstrap correlations were undefined. ",
+            "Valid replicate counts are reported.")
   }
-  
-  n_pages <- as.integer(first_parsed[[1]]$pages[1])
-  
-  map_dfr(seq_len(n_pages), fetch_page) |>
-    rename(!!indicator_name := value)
-}
-
-fetch_wgi_api_source <- function(source_id) {
-  message("Trying direct World Bank API fallback with source = ", source_id)
-  
-  wgi_list <- imap(
-    wgi_indicators,
-    ~ fetch_wb_indicator(
-      indicator_code = .x,
-      indicator_name = .y,
-      source_id = source_id,
-      start_year = start_year_wgi,
-      end_year = end_year_wgi
-    )
+  ci <- t(vapply(seq_len(ncol(boot_estimates)), function(j) {
+    stats::quantile(boot_estimates[, j], probs = c(alpha / 2, 1 - alpha / 2),
+                    na.rm = TRUE, names = FALSE)
+  }, numeric(2)))
+  cor_results <- data.frame(
+    index_family = fam$label,
+    specs, estimate = unname(point_estimates), conf_low = ci[, 1L], conf_high = ci[, 2L],
+    n_country_years = nrow(d), n_countries = G,
+    year_min = min(d$year), year_max = max(d$year),
+    bootstrap_requested = BOOT_REPS, bootstrap_valid = unname(valid_reps),
+    confidence_level = CONF_LEVEL, ci_method = "Country-pairs bootstrap percentile"
+  )
+  country_coverage <- do.call(rbind, lapply(split(d, d$iso3), function(z) {
+    data.frame(iso3 = z$iso3[1L], n_years = nrow(z),
+               first_year = min(z$year), last_year = max(z$year))
+  }))
+  sample_audit <- data.frame(
+    index_family = fam$label,
+    stage = c("Input rows", "Invalid or missing keys", "Valid keys outside period",
+              "Rows in requested period", "Excluded: missing/nonfinite measures",
+              "Shared complete-case country-years", "Countries in shared sample"),
+    n = c(nrow(src), sum(!valid_keys), sum(valid_keys & !in_period),
+          nrow(period_data), sum(!complete), nrow(d), G)
   )
   
-  reduce(
-    wgi_list,
-    full_join,
-    by = c("iso3c", "country", "year")
-  )
-}
-
-if (is.null(wgi_raw) || nrow(wgi_raw) == 0) {
-  wgi_raw <- fetch_wgi_api_source(3)
-}
-
-if (is.null(wgi_raw) || nrow(wgi_raw) == 0) {
-  wgi_raw <- fetch_wgi_api_source(75)
-}
-
-wgi_raw <- wgi_raw |>
-  filter(
-    !is.na(iso3c),
-    iso3c != "",
-    year >= start_year_wgi,
-    year <= end_year_wgi
-  )
-
-if (nrow(wgi_raw) == 0) {
-  stop(
-    "No WGI data were downloaded. The World Bank API may be unavailable, ",
-    "or the WGI source/indicator codes may have changed. ",
-    "Try again later or download the WGI CSV manually."
-  )
-}
-
-print(head(wgi_raw))
-print(summary(wgi_raw))
-
-# ------------------------------------------------------------------------------
-# Preparing analysis samples ---------------------------------------------------
-# ------------------------------------------------------------------------------
-analysis_sample <- standardized_data_final |>
-  ungroup() |>
-  transmute(
-    country = COUNTRY_NAME,
-    iso3 = as.character(ISO_CODE_3),
-    year = as.integer(YEAR),
-    vdem_fragile_binary = VDEM_FRAGILE_IDEAL,
-    wgi_fragile_binary = WGI_FRAGILE_IDEAL
-  )
-
-analysis_sample_wgi <- analysis_sample |>
-  filter(
-    year >= start_year_wgi,
-    year <= end_year_wgi
-  )
-
-# ------------------------------------------------------------------------------
-# Extracting and preparing V-Dem components ------------------------------------
-# ------------------------------------------------------------------------------
-vdem_components <- vdem_raw |>
-  transmute(
-    iso3 = as.character(country_text_id),
-    country_vdem = country_name,
-    year = as.integer(year),
-    
-    v2x_corr = v2x_corr,
-    v2caviol = v2caviol,
-    v2x_rule = v2x_rule,
-    v2clrspct = v2clrspct
-  )
-
-df_vdem_components_raw <- analysis_sample |>
-  left_join(
-    vdem_components,
-    by = c("iso3", "year")
-  )
-
-unmatched_vdem_components <- df_vdem_components_raw |>
-  filter(
-    is.na(v2x_corr) &
-      is.na(v2caviol) &
-      is.na(v2x_rule) &
-      is.na(v2clrspct)
-  ) |>
-  distinct(country, iso3, year)
-
-print(unmatched_vdem_components)
-
-df_vdem_components <- df_vdem_components_raw |>
-  mutate(
-    corruption_raw = v2x_corr,
-    nonstate_violence_raw = v2caviol,
-    weak_rule_of_law_raw = -v2x_rule,
-    weak_public_admin_raw = -v2clrspct
-  ) |>
-  mutate(
-    corruption_frag =
-      orient_to_fragility(corruption_raw, vdem_fragile_binary),
-    
-    nonstate_violence_frag =
-      orient_to_fragility(nonstate_violence_raw, vdem_fragile_binary),
-    
-    weak_rule_of_law_frag =
-      orient_to_fragility(weak_rule_of_law_raw, vdem_fragile_binary),
-    
-    weak_public_admin_frag =
-      orient_to_fragility(weak_public_admin_raw, vdem_fragile_binary)
-  ) |>
-  mutate(
-    `Corruption / predation` =
-      rescale01(corruption_frag),
-    
-    `Violence / instability` =
-      rescale01(nonstate_violence_frag),
-    
-    `Weak rule of law` =
-      rescale01(weak_rule_of_law_frag),
-    
-    `Weak public administration` =
-      rescale01(weak_public_admin_frag)
-  )
-
-vdem_component_cols <- c(
-  "Corruption / predation",
-  "Violence / instability",
-  "Weak rule of law",
-  "Weak public administration"
-)
-
-vdem_orientation_diagnostics <- df_vdem_components |>
-  summarise(
-    corr_corruption_with_fragile =
-      safe_cor(`Corruption / predation`, vdem_fragile_binary),
-    
-    corr_violence_with_fragile =
-      safe_cor(`Violence / instability`, vdem_fragile_binary),
-    
-    corr_rule_law_with_fragile =
-      safe_cor(`Weak rule of law`, vdem_fragile_binary),
-    
-    corr_admin_with_fragile =
-      safe_cor(`Weak public administration`, vdem_fragile_binary)
-  )
-
-print(vdem_orientation_diagnostics)
-
-vdem_cor_matrix <- make_correlation_matrix(
-  data = df_vdem_components,
-  component_cols = vdem_component_cols
-)
-
-print(round(vdem_cor_matrix, 3))
-
-# ------------------------------------------------------------------------------
-# Extracting and preparing WGI components --------------------------------------
-# ------------------------------------------------------------------------------
-wgi_components <- wgi_raw |>
-  filter(!is.na(iso3c)) |>
-  transmute(
-    iso3 = as.character(iso3c),
-    country_wgi = country,
-    year = as.integer(year),
-    
-    wgi_control_corruption = wgi_control_corruption,
-    wgi_political_stability = wgi_political_stability,
-    wgi_rule_of_law = wgi_rule_of_law,
-    wgi_government_effectiveness = wgi_government_effectiveness
-  )
-
-df_wgi_components_raw <- analysis_sample_wgi |>
-  left_join(
-    wgi_components,
-    by = c("iso3", "year")
-  )
-
-unmatched_wgi_components <- df_wgi_components_raw |>
-  filter(
-    is.na(wgi_control_corruption) &
-      is.na(wgi_political_stability) &
-      is.na(wgi_rule_of_law) &
-      is.na(wgi_government_effectiveness)
-  ) |>
-  distinct(country, iso3, year)
-
-print(unmatched_wgi_components)
-
-df_wgi_components <- df_wgi_components_raw |>
-  mutate(
-    # WGI indicators are oriented so higher = better governance.
-    # Reversing them so higher = greater institutional fragility.
-    corruption_raw = -wgi_control_corruption,
-    violence_raw = -wgi_political_stability,
-    weak_rule_of_law_raw = -wgi_rule_of_law,
-    weak_public_admin_raw = -wgi_government_effectiveness
-  ) |>
-  mutate(
-    corruption_frag =
-      orient_to_fragility(corruption_raw, wgi_fragile_binary),
-    
-    violence_frag =
-      orient_to_fragility(violence_raw, wgi_fragile_binary),
-    
-    weak_rule_of_law_frag =
-      orient_to_fragility(weak_rule_of_law_raw, wgi_fragile_binary),
-    
-    weak_public_admin_frag =
-      orient_to_fragility(weak_public_admin_raw, wgi_fragile_binary)
-  ) |>
-  mutate(
-    `Corruption / predation` =
-      rescale01(corruption_frag),
-    
-    `Violence / instability` =
-      rescale01(violence_frag),
-    
-    `Weak rule of law` =
-      rescale01(weak_rule_of_law_frag),
-    
-    `Weak public administration` =
-      rescale01(weak_public_admin_frag)
-  )
-
-wgi_component_cols <- c(
-  "Corruption / predation",
-  "Violence / instability",
-  "Weak rule of law",
-  "Weak public administration"
-)
-
-wgi_orientation_diagnostics <- df_wgi_components |>
-  summarise(
-    corr_corruption_with_fragile =
-      safe_cor(`Corruption / predation`, wgi_fragile_binary),
-    
-    corr_violence_with_fragile =
-      safe_cor(`Violence / instability`, wgi_fragile_binary),
-    
-    corr_rule_law_with_fragile =
-      safe_cor(`Weak rule of law`, wgi_fragile_binary),
-    
-    corr_admin_with_fragile =
-      safe_cor(`Weak public administration`, wgi_fragile_binary)
-  )
-
-print(wgi_orientation_diagnostics)
-
-wgi_cor_matrix <- make_correlation_matrix(
-  data = df_wgi_components,
-  component_cols = wgi_component_cols
-)
-
-print(round(wgi_cor_matrix, 3))
-
-# ------------------------------------------------------------------------------
-# Building LaTeX-ready matrices ------------------------------------------------
-# ------------------------------------------------------------------------------
-vdem_latex_matrix <- lower_triangle_for_latex(
-  cor_mat = vdem_cor_matrix,
-  panel_label = "Panel A: V-Dem components"
-)
-
-wgi_latex_matrix <- lower_triangle_for_latex(
-  cor_mat = wgi_cor_matrix,
-  panel_label = "Panel B: WGI components"
-)
-
-# ------------------------------------------------------------------------------
-# Printing separate LaTeX tables -----------------------------------------------
-# ------------------------------------------------------------------------------
-knitr::kable(
-  vdem_latex_matrix |> select(-panel),
-  format = "latex",
-  booktabs = TRUE,
-  escape = FALSE,
-  caption = "Pairwise Correlations among V-Dem Fragility Components",
-  label = "fragility_component_correlation_matrix_vdem"
-)
-
-knitr::kable(
-  wgi_latex_matrix |> select(-panel),
-  format = "latex",
-  booktabs = TRUE,
-  escape = FALSE,
-  caption = "Pairwise Correlations among WGI Fragility Components",
-  label = "fragility_component_correlation_matrix_wgi"
-)
-
-# ------------------------------------------------------------------------------
-# Manually assembling two-panel LaTeX table ------------------------------------
-# ------------------------------------------------------------------------------
-latex_two_panel <- c(
-  "\\begin{table}[!htbp]",
-  "\\centering",
-  "\\caption{Pairwise Correlations among Fragility Components}",
-  "\\label{tab:fragility_component_correlation_matrix}",
-  "\\begingroup",
-  "\\footnotesize",
-  "\\setlength{\\tabcolsep}{5pt}",
-  "\\renewcommand{\\arraystretch}{1.15}",
-  "",
-  "\\begin{tabular}{lrrrr}",
-  "\\toprule",
-  "Component & \\makecell{Corruption /\\\\predation} & \\makecell{Violence /\\\\instability} & \\makecell{Weak rule\\\\of law} & \\makecell{Weak public\\\\administration} \\\\",
-  "\\midrule",
-  "\\multicolumn{5}{l}{\\textit{Panel A: V-Dem components}} \\\\",
-  paste0(
-    vdem_latex_matrix$Component, " & ",
-    vdem_latex_matrix[[2]], " & ",
-    vdem_latex_matrix[[3]], " & ",
-    vdem_latex_matrix[[4]], " & ",
-    vdem_latex_matrix[[5]], " \\\\"
-  ),
-  "\\addlinespace",
-  "\\multicolumn{5}{l}{\\textit{Panel B: WGI components}} \\\\",
-  paste0(
-    wgi_latex_matrix$Component, " & ",
-    wgi_latex_matrix[[2]], " & ",
-    wgi_latex_matrix[[3]], " & ",
-    wgi_latex_matrix[[4]], " & ",
-    wgi_latex_matrix[[5]], " \\\\"
-  ),
-  "\\bottomrule",
-  "\\end{tabular}",
-  "",
-  "\\vspace{0.2cm}",
-  "",
-  "\\begin{minipage}{0.92\\textwidth}",
-  "\\footnotesize",
-  "\\emph{Notes:} The table reports Pearson correlations among reoriented fragility components. Panel A uses V-Dem components; Panel B uses WGI components. All variables are scaled so that higher values indicate greater institutional fragility. For V-Dem, corruption/predation is based on the political corruption index, violence/instability is based on the V-Dem political violence measure, weak rule of law reverses the rule-of-law index, and weak public administration reverses the rigorous and impartial public administration measure. For WGI, corruption/predation reverses control of corruption, violence/instability reverses political stability and absence of violence/terrorism, weak rule of law reverses rule of law, and weak public administration reverses government effectiveness. Correlations are computed using pairwise complete observations. The table is intended as a measurement-validity diagnostic: the components are positively correlated, consistent with a common institutional syndrome, but not perfectly collinear.",
-  "\\end{minipage}",
-  "",
-  "\\endgroup",
-  "\\end{table}"
-)
-
-writeLines(
-  latex_two_panel,
-  con = "fragility_component_correlation_matrix_two_panel.tex"
-)
-
-cat(paste(latex_two_panel, collapse = "\n"))
-
-# ==============================================================================
-# PCA Loadings and Variance Explained
-# V-Dem and WGI fragility components
-#
-# Assumes the previous pipeline already created:
-#   df_vdem_components
-#   df_wgi_components
-#   vdem_component_cols
-#   wgi_component_cols
-#
-# Higher component values = greater institutional fragility
-# ==============================================================================
-# ------------------------------------------------------------------------------
-# Helpers: estimating PCA and extract diagnostics ------------------------------
-# ------------------------------------------------------------------------------
-run_component_pca <- function(data, component_cols, source_label) {
+  print(cor_results, row.names = FALSE)
   
-  pca_data <- data |>
-    select(all_of(component_cols)) |>
-    drop_na()
+  capture.output(settings, utils::sessionInfo(),
+                 file = file_out(sprintf("%s_state_capacity_run_info.txt", family)))
   
-  pca_fit <- prcomp(
-    pca_data,
-    center = TRUE,
-    scale. = TRUE
-  )
-  
-  eigenvalues <- pca_fit$sdev^2
-  variance_share <- eigenvalues / sum(eigenvalues)
-  
-  pc1_loadings <- pca_fit$rotation[, 1]
-  
-  # PCA signs are arbitrary. Reorient PC1 so positive loadings
-  # correspond to greater fragility on average.
-  if (mean(pc1_loadings, na.rm = TRUE) < 0) {
-    pc1_loadings <- -pc1_loadings
-  }
-  
-  loadings_table <- tibble(
-    source = source_label,
-    component = names(pc1_loadings),
-    pc1_loading = as.numeric(pc1_loadings)
-  )
-  
-  summary_table <- tibble(
-    source = source_label,
-    n_complete_country_years = nrow(pca_data),
-    pc1_eigenvalue = eigenvalues[1],
-    pc1_variance_explained = variance_share[1],
-    pc2_variance_explained = variance_share[2],
-    pc3_variance_explained = variance_share[3],
-    pc4_variance_explained = variance_share[4]
-  )
-  
-  list(
-    pca_fit = pca_fit,
-    loadings = loadings_table,
-    summary = summary_table
-  )
+  list(sample = d, n_countries = G, orientation_audit = orientation_audit,
+       cor_results = cor_results, country_coverage = country_coverage,
+       sample_audit = sample_audit, boot_estimates = boot_estimates)
 }
 
 # ------------------------------------------------------------------------------
-# Running PCA separately for V-Dem and WGI -------------------------------------
+# Run both families ------------------------------------------------------------
 # ------------------------------------------------------------------------------
-pca_vdem <- run_component_pca(
-  data = df_vdem_components,
-  component_cols = vdem_component_cols,
-  source_label = "V-Dem"
+results_by_family <- lapply(stats::setNames(names(INDEX_FAMILIES), names(INDEX_FAMILIES)),
+                            run_family)
+
+# Combined results (V-Dem and WGI rows; samples differ across families).
+cor_results <- do.call(rbind, lapply(results_by_family, `[[`, "cor_results"))
+rownames(cor_results) <- NULL
+sample_audit <- do.call(rbind, lapply(results_by_family, `[[`, "sample_audit"))
+rownames(sample_audit) <- NULL
+orientation_audit <- do.call(rbind, lapply(results_by_family, `[[`, "orientation_audit"))
+rownames(orientation_audit) <- NULL
+
+print(cor_results[, c("index_family", "outcome", "adjustment", "method",
+                      "estimate", "conf_low", "conf_high",
+                      "n_country_years", "n_countries", "year_min", "year_max")],
+      row.names = FALSE, digits = 3)
+
+# ------------------------------------------------------------------------------
+# Plot: V-Dem and WGI in one figure --------------------------------------------
+# ------------------------------------------------------------------------------
+# Samples differ ACROSS sources (WGI starts in 1996) but are shared WITHIN each
+# source. The legend and caption state each source's sample explicitly.
+family_labels <- vapply(INDEX_FAMILIES, `[[`, character(1), "label")
+row_levels <- unlist(lapply(INDEX_FAMILIES, function(f) {
+  paste0(f$label, ": ", c("Full index", "Excluding rule of law"))
+}), use.names = FALSE)
+
+sample_info <- unique(cor_results[c("index_family", "n_country_years", "n_countries",
+                                    "year_min", "year_max")])
+sample_info <- sample_info[match(family_labels, sample_info$index_family), , drop = FALSE]
+sample_text <- sprintf("%s: %s country-years, %s countries, %s-%s",
+                       sample_info$index_family,
+                       format(sample_info$n_country_years, big.mark = ",", trim = TRUE),
+                       sample_info$n_countries, sample_info$year_min, sample_info$year_max)
+legend_labels <- stats::setNames(
+  sprintf("%s (%s-%s)", sample_info$index_family, sample_info$year_min, sample_info$year_max),
+  sample_info$index_family
 )
 
-pca_wgi <- run_component_pca(
-  data = df_wgi_components,
-  component_cols = wgi_component_cols,
-  source_label = "WGI"
+plot_data <- cor_results[cor_results$method == "pearson", , drop = FALSE]
+plot_data$index_type <- ifelse(grepl("_norl$", plot_data$outcome),
+                               "Excluding rule of law", "Full index")
+plot_data$index <- factor(paste0(plot_data$index_family, ": ", plot_data$index_type),
+                          levels = rev(row_levels))
+plot_data$index_family <- factor(plot_data$index_family, levels = family_labels)
+plot_data$panel <- factor(
+  plot_data$adjustment, levels = adjustments,
+  labels = c("Pooled association", "Year-adjusted association",
+             "Within-country association\n(country and year adjusted)")
+)
+plot_data$label <- sprintf("%.2f", plot_data$estimate)
+
+caption <- paste0(
+  "Samples differ by source; within each source, both indices and all panels share one sample.\n",
+  paste(sample_text, collapse = "; "), ".\n",
+  "Higher fragility scores = more fragile; higher capacity scores = greater capacity.\n",
+  sprintf("Whiskers: %.0f%% country-cluster bootstrap percentile intervals (%s draws per source).",
+          100 * CONF_LEVEL, format(BOOT_REPS, big.mark = ",", trim = TRUE))
 )
 
-# ------------------------------------------------------------------------------
-# Combining outputs ------------------------------------------------------------
-# ------------------------------------------------------------------------------
-pca_loadings <- bind_rows(
-  pca_vdem$loadings,
-  pca_wgi$loadings
-)
-
-pca_summary <- bind_rows(
-  pca_vdem$summary,
-  pca_wgi$summary
-)
-
-print(pca_loadings)
-print(pca_summary)
-
-# ------------------------------------------------------------------------------
-# LaTeX table ------------------------------------------------------------------
-# ------------------------------------------------------------------------------
-pca_loadings_wide <- pca_loadings |>
-  mutate(
-    pc1_loading_print = sprintf("%.3f", pc1_loading)
-  ) |>
-  select(source, component, pc1_loading_print) |>
-  pivot_wider(
-    names_from = source,
-    values_from = pc1_loading_print
-  )
-
-pca_summary_print <- pca_summary |>
-  transmute(
-    source,
-    n_complete_country_years,
-    pc1_eigenvalue_print = sprintf("%.3f", pc1_eigenvalue),
-    pc1_variance_print = percent(pc1_variance_explained, accuracy = 0.1),
-    pc2_variance_print = percent(pc2_variance_explained, accuracy = 0.1),
-    pc3_variance_print = percent(pc3_variance_explained, accuracy = 0.1),
-    pc4_variance_print = percent(pc4_variance_explained, accuracy = 0.1)
-  )
-
-print(pca_loadings_wide)
-print(pca_summary_print)
-
-# ------------------------------------------------------------------------------
-# Combined appendix table: loadings + PC1 variance explained -------------------
-# ------------------------------------------------------------------------------
-latex_pca_table <- pca_loadings |>
-  mutate(
-    component = factor(
-      component,
-      levels = c(
-        "Corruption / predation",
-        "Violence / instability",
-        "Weak rule of law",
-        "Weak public administration"
-      )
-    ),
-    pc1_loading_print = sprintf("%.3f", pc1_loading)
-  ) |>
-  select(source, component, pc1_loading_print) |>
-  pivot_wider(
-    names_from = source,
-    values_from = pc1_loading_print
-  ) |>
-  arrange(component) |>
-  mutate(
-    component = as.character(component)
-  ) |>
-  select(
-    Component = component,
-    `V-Dem PC1 loading` = `V-Dem`,
-    `WGI PC1 loading` = WGI
-  )
-
-knitr::kable(
-  latex_pca_table,
-  format = "latex",
-  booktabs = TRUE,
-  escape = FALSE,
-  caption = "PCA Loadings for Fragility Components",
-  label = "tab:fragility_component_pca_loadings"
-)
-
-# ------------------------------------------------------------------------------
-# Assembled LaTeX table with notes ---------------------------------------------
-# ------------------------------------------------------------------------------
-vdem_pc1_share <- pca_summary |>
-  filter(source == "V-Dem") |>
-  pull(pc1_variance_explained)
-
-wgi_pc1_share <- pca_summary |>
-  filter(source == "WGI") |>
-  pull(pc1_variance_explained)
-
-vdem_n <- pca_summary |>
-  filter(source == "V-Dem") |>
-  pull(n_complete_country_years)
-
-wgi_n <- pca_summary |>
-  filter(source == "WGI") |>
-  pull(n_complete_country_years)
-
-latex_pca_manual <- c(
-  "\\begin{table}[!htbp]",
-  "\\centering",
-  "\\caption{PCA Loadings and Variance Explained by the First Component}",
-  "\\label{tab:fragility_component_pca_loadings}",
-  "\\begingroup",
-  "\\footnotesize",
-  "\\setlength{\\tabcolsep}{6pt}",
-  "\\renewcommand{\\arraystretch}{1.15}",
-  "",
-  "\\begin{tabular}{lrr}",
-  "\\toprule",
-  "Component & \\makecell{V-Dem\\\\PC1 loading} & \\makecell{WGI\\\\PC1 loading} \\\\",
-  "\\midrule",
-  paste0(
-    latex_pca_table$Component, " & ",
-    latex_pca_table$`V-Dem PC1 loading`, " & ",
-    latex_pca_table$`WGI PC1 loading`, " \\\\"
-  ),
-  "\\midrule",
-  paste0(
-    "Complete country-years & ",
-    format(vdem_n, big.mark = ","), " & ",
-    format(wgi_n, big.mark = ","), " \\\\"
-  ),
-  paste0(
-    "Variance explained by PC1 & ",
-    percent(vdem_pc1_share, accuracy = 0.1), " & ",
-    percent(wgi_pc1_share, accuracy = 0.1), " \\\\"
-  ),
-  "\\bottomrule",
-  "\\end{tabular}",
-  "",
-  "\\vspace{0.2cm}",
-  "",
-  "\\begin{minipage}{0.92\\textwidth}",
-  "\\footnotesize",
-  "\\emph{Notes:} The table reports first-component PCA loadings for the four reoriented fragility components. All variables are scaled so that higher values indicate greater institutional fragility. PCA is estimated separately for the V-Dem and WGI operationalizations using standardized component scores. The sign of the first component is oriented so that positive loadings correspond to greater fragility. The final row reports the share of total variance explained by the first principal component.",
-  "\\end{minipage}",
-  "",
-  "\\endgroup",
-  "\\end{table}"
-)
-
-writeLines(
-  latex_pca_manual,
-  con = "fragility_component_pca_loadings_table.tex"
-)
-
-cat(paste(latex_pca_manual, collapse = "\n"))
-
-# ==============================================================================
-# Cross-Dimensional Range Diagnostic
-# V-Dem and WGI fragility components
-#
-# Goal:
-#   Assess whether country-years often combine very high fragility
-#   on one dimension with very low fragility on another.
-#
-# Range:
-#   max(component scores) - min(component scores)
-#
-# Higher range = more cross-dimensional imbalance
-# Lower range  = components move more jointly within a country-year
-# ==============================================================================
-# ------------------------------------------------------------------------------
-# Helpers ----------------------------------------------------------------------
-# ------------------------------------------------------------------------------
-make_range_diagnostic <- function(data, component_cols, source_label) {
-  
-  d <- data |>
-    select(
-      country,
-      iso3,
-      year,
-      all_of(component_cols)
-    ) |>
-    drop_na(all_of(component_cols))
-  
-  component_matrix <- as.matrix(d[, component_cols])
-  
-  max_idx <- apply(component_matrix, 1, which.max)
-  min_idx <- apply(component_matrix, 1, which.min)
-  
-  d |>
-    mutate(
-      source = source_label,
-      component_min = apply(component_matrix, 1, min),
-      component_max = apply(component_matrix, 1, max),
-      component_mean = rowMeans(component_matrix),
-      component_sd = apply(component_matrix, 1, sd),
-      cross_dimensional_range = component_max - component_min,
-      most_fragile_component = component_cols[max_idx],
-      least_fragile_component = component_cols[min_idx]
-    )
-}
-
-# ------------------------------------------------------------------------------
-# Diagnostics for V-Dem and WGI ------------------------------------------------
-# ------------------------------------------------------------------------------
-vdem_range <- make_range_diagnostic(
-  data = df_vdem_components,
-  component_cols = vdem_component_cols,
-  source_label = "V-Dem"
-)
-
-wgi_range <- make_range_diagnostic(
-  data = df_wgi_components,
-  component_cols = wgi_component_cols,
-  source_label = "WGI"
-)
-
-range_data <- bind_rows(
-  vdem_range,
-  wgi_range
-)
-
-print(head(range_data))
-
-# ------------------------------------------------------------------------------
-# Summary statistics -----------------------------------------------------------
-# ------------------------------------------------------------------------------
-range_summary <- range_data |>
-  group_by(source) |>
-  summarise(
-    country_years = n(),
-    mean_range = mean(cross_dimensional_range),
-    sd_range = sd(cross_dimensional_range),
-    median_range = median(cross_dimensional_range),
-    p75_range = quantile(cross_dimensional_range, 0.75),
-    p90_range = quantile(cross_dimensional_range, 0.90),
-    p95_range = quantile(cross_dimensional_range, 0.95),
-    p99_range = quantile(cross_dimensional_range, 0.99),
-    share_range_le_025 = mean(cross_dimensional_range <= 0.25),
-    share_range_le_050 = mean(cross_dimensional_range <= 0.50),
-    share_range_ge_050 = mean(cross_dimensional_range >= 0.50),
-    share_range_ge_075 = mean(cross_dimensional_range >= 0.75),
-    .groups = "drop"
-  )
-
-print(range_summary)
-
-# ------------------------------------------------------------------------------
-# Binned distribution ----------------------------------------------------------
-# ------------------------------------------------------------------------------
-range_bins <- range_data |>
-  mutate(
-    range_bin = cut(
-      cross_dimensional_range,
-      breaks = c(0, 0.10, 0.25, 0.50, 0.75, 1.00),
-      include.lowest = TRUE,
-      right = TRUE,
-      labels = c(
-        "0.00--0.10",
-        "0.10--0.25",
-        "0.25--0.50",
-        "0.50--0.75",
-        "0.75--1.00"
-      )
-    )
-  ) |>
-  count(source, range_bin, name = "country_years") |>
-  group_by(source) |>
-  mutate(
-    share = country_years / sum(country_years),
-    share_print = percent(share, accuracy = 0.1)
-  ) |>
-  ungroup()
-
-print(range_bins)
-
-# ------------------------------------------------------------------------------
-# Most discordant country-years ------------------------------------------------
-# ------------------------------------------------------------------------------
-top_discordant_cases <- range_data |>
-  group_by(source) |>
-  slice_max(
-    order_by = cross_dimensional_range,
-    n = 25,
-    with_ties = FALSE
-  ) |>
-  ungroup() |>
-  arrange(source, desc(cross_dimensional_range)) |>
-  select(
-    source,
-    country,
-    iso3,
-    year,
-    cross_dimensional_range,
-    component_min,
-    component_max,
-    least_fragile_component,
-    most_fragile_component,
-    all_of(vdem_component_cols)
-  )
-
-print(top_discordant_cases)
-
-# ------------------------------------------------------------------------------
-# LaTeX summary table ----------------------------------------------------------
-# ------------------------------------------------------------------------------
-range_summary_latex <- range_summary |>
-  transmute(
-    Source = source,
-    `Country-years` = format(country_years, big.mark = ","),
-    `Mean range` = sprintf("%.3f", mean_range),
-    `Median range` = sprintf("%.3f", median_range),
-    `75th pct.` = sprintf("%.3f", p75_range),
-    `90th pct.` = sprintf("%.3f", p90_range),
-    `95th pct.` = sprintf("%.3f", p95_range),
-    `Share range $\\leq$ 0.25` = percent(share_range_le_025, accuracy = 0.1),
-    `Share range $\\leq$ 0.50` = percent(share_range_le_050, accuracy = 0.1),
-    `Share range $\\geq$ 0.75` = percent(share_range_ge_075, accuracy = 0.1)
-  )
-
-print(range_summary_latex)
-
-knitr::kable(
-  range_summary_latex,
-  format = "latex",
-  booktabs = TRUE,
-  escape = FALSE,
-  caption = "Distribution of Cross-Dimensional Ranges among Fragility Components",
-  label = "fragility_component_cross_dimensional_range_summary"
-)
-
-# ------------------------------------------------------------------------------
-# LaTeX binned distribution table ----------------------------------------------
-# ------------------------------------------------------------------------------
-range_bins_latex <- range_bins |>
-  select(source, range_bin, country_years, share_print) |>
-  pivot_wider(
-    names_from = source,
-    values_from = c(country_years, share_print),
-    names_glue = "{source}_{.value}"
-  ) |>
-  transmute(
-    `Cross-dimensional range` = as.character(range_bin),
-    `V-Dem country-years` = format(`V-Dem_country_years`, big.mark = ","),
-    `V-Dem share` = `V-Dem_share_print`,
-    `WGI country-years` = format(WGI_country_years, big.mark = ","),
-    `WGI share` = WGI_share_print
-  )
-
-print(range_bins_latex)
-
-knitr::kable(
-  range_bins_latex,
-  format = "latex",
-  booktabs = TRUE,
-  escape = FALSE,
-  caption = "Binned Distribution of Cross-Dimensional Ranges among Fragility Components",
-  label = "fragility_component_cross_dimensional_range_bins"
-)
-
-# ------------------------------------------------------------------------------
-# Plot: distribution of cross-dimensional ranges -------------------------------
-# ------------------------------------------------------------------------------
-dark_red <- "#A12A2A"
-
-range_medians <- range_data |>
-  group_by(source) |>
-  summarise(
-    median_range = median(cross_dimensional_range),
-    .groups = "drop"
-  )
-
-p_range_distribution <- ggplot(
-  range_data,
-  aes(x = cross_dimensional_range)
+p_state_capacity_cor <- ggplot(
+  plot_data, aes(x = estimate, y = index, colour = index_family)
 ) +
-  geom_histogram(
-    binwidth = 0.05,
-    boundary = 0,
-    closed = "right",
-    fill = dark_red,
-    colour = "white",
-    linewidth = 0.2
-  ) +
-  geom_vline(
-    data = range_medians,
-    aes(xintercept = median_range),
-    linetype = "dashed",
-    linewidth = 0.6,
-    colour = "grey25"
-  ) +
-  facet_wrap(~ source, ncol = 1, scales = "free_y") +
-  scale_x_continuous(
-    limits = c(0, 1),
-    breaks = seq(0, 1, by = 0.1),
-    labels = number_format(accuracy = 0.1)
-  ) +
-  labs(
-    x = "Cross-dimensional range",
-    y = "Country-years",
-    title = "Distribution of cross-dimensional ranges among fragility components",
-    subtitle = "Range = maximum component score minus minimum component score within each country-year"
-  ) +
-  theme_bw(base_size = 12) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey55") +
+  geom_segment(aes(x = conf_low, xend = conf_high, yend = index), linewidth = 0.9) +
+  geom_point(size = 2.6) +
+  geom_text(aes(label = label), nudge_y = 0.28,
+            size = 3.3, colour = "grey20") +
+  facet_wrap(~panel, nrow = 1) +
+  scale_colour_manual(values = FAMILY_COLOURS, labels = legend_labels,
+                      name = NULL, drop = FALSE) +
+  scale_x_continuous(limits = c(-1, 1), breaks = seq(-1, 1, by = 0.5),
+                     expand = expansion(mult = 0.04)) +
+  scale_y_discrete(expand = expansion(add = c(0.5, 0.75))) +
+  labs(title = sprintf("State capacity and Fragility Status: V-Dem and WGI indices (%s-%s)",
+                       min(sample_info$year_min), max(sample_info$year_max)),
+       x = "Pearson correlation", y = NULL, caption = caption) +
+  theme_bw(base_size = 11) +
   theme(
-    plot.title = element_text(face = "bold", hjust = 0.5),
-    plot.subtitle = element_text(hjust = 0.5, colour = "grey25"),
-    strip.text = element_text(face = "bold"),
     panel.grid.minor = element_blank(),
-    panel.grid.major.y = element_line(colour = "grey90"),
-    panel.grid.major.x = element_line(colour = "grey85")
+    panel.grid.major.y = element_blank(),
+    panel.border = element_rect(fill = NA, colour = "grey75"),
+    axis.text = element_text(colour = "black"),
+    legend.position = "top",
+    legend.justification = "left",
+    legend.margin = margin(0, 0, 0, 0),
+    plot.caption = element_text(hjust = 0, size = 9),
+    plot.margin = margin(12, 12, 12, 12)
   )
+print(p_state_capacity_cor)
 
-p_range_distribution
+ggsave(file_out("vdem_wgi_state_capacity_correlations.png"), p_state_capacity_cor,
+       width = 12, height = 6, dpi = 300, bg = "white")
 
-ggsave(
-  filename = "fragility_component_cross_dimensional_range_distribution.png",
-  plot = p_range_distribution,
-  width = 9,
-  height = 7,
-  dpi = 300
-)
+ggsave(file_out("vdem_wgi_state_capacity_correlations.pdf"), p_state_capacity_cor,
+       width = 12, height = 6, bg = "white")
