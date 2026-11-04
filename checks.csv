@@ -1,0 +1,8 @@
+check,status,detail
+unique keys,PASS,
+columns match codebook,PASS,
+binary variables are 0/1/NA,PASS,
+status variables use the three labels,PASS,
+legacy index reproduces the 36 published exits,PASS,(36 exits)
+legacy no-RoL index reproduces 39 exits,PASS,(39 exits)
+GDP per capita present (dated WDI download),PASS,(95% non-missing)

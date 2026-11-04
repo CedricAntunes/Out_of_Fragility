@@ -1,0 +1,98 @@
+variable,block,coding,source,script,description
+ISO_CODE_3,key,ISO3,V-Dem v16,01,Country (ISO3; V-Dem territory conventions; XKX = Kosovo)
+COUNTRY_NAME,key,text,data-raw/country_names.csv,01,Country name (World Bank style)
+YEAR,key,integer,-,01,"Calendar year, 1971-2022"
+VDEM_REGIME_CORRUPTION,index,"V-Dem scale, higher = more corrupt",V-Dem v16 v2xnp_regcorr,02,Regime corruption (component)
+VDEM_POLITICAL_VIOLENCE,index,"V-Dem scale, higher = more violence",V-Dem v16 v2caviol,02,Political violence by non-state actors (component)
+VDEM_RULE_OF_LAW,index,"0-1, higher = stronger",V-Dem v16 v2x_rule,02,Rule of law (component)
+VDEM_IMPARTIAL_ADMIN,index,"V-Dem scale, higher = more impartial",V-Dem v16 v2clrspct,02,Rigorous and impartial public administration (component)
+VDEM_INDEX,index,"mean 0, SD 1; higher = LESS fragile",V-Dem v16,02,"PRIMARY fragility index: PC1 of the four components, fixed (pooled) scale"
+VDEM_STATUS,index,Fragile / Transitioning / Non Fragile,V-Dem v16,02,"Annual status from VDEM_INDEX: <= P30 Fragile, > P35 Non Fragile"
+VDEM_INDEX_NORL,index,"mean 0, SD 1; higher = LESS fragile",V-Dem v16,02,"Index without rule of law, fixed scale"
+VDEM_STATUS_NORL,index,Fragile / Transitioning / Non Fragile,V-Dem v16,02,Annual status from VDEM_INDEX_NORL
+VDEM_INDEX_WY,index,mean 0 every year; higher = LESS fragile,V-Dem v16,02,Index with components standardized within year (original Excel recipe)
+VDEM_STATUS_WY,index,Fragile / Transitioning / Non Fragile,V-Dem v16,02,Annual status from VDEM_INDEX_WY
+VDEM_INDEX_NORL_WY,index,mean 0 every year; higher = LESS fragile,V-Dem v16,02,"Index without rule of law, within-year scale"
+VDEM_STATUS_NORL_WY,index,Fragile / Transitioning / Non Fragile,V-Dem v16,02,Annual status from VDEM_INDEX_NORL_WY
+VDEM_INDEX_LEGACY_V14,index,Excel 'Loading Factor 1 Normalized',V-Dem v14 (Excel PCA),02,Index used in all results before Nov 2026 (reproduction only)
+VDEM_STATUS_LEGACY_V14,index,Fragile / Transitioning / Non Fragile,V-Dem v14 (Excel PCA),02,"Legacy status, percentiles over the legacy panel (yields the 36 exits)"
+VDEM_INDEX_NORL_LEGACY_V14,index,Excel 'Loading Factor 1 Normalized',V-Dem v14 (Excel PCA),02,Legacy index without rule of law (reproduction only)
+VDEM_STATUS_NORL_LEGACY_V14,index,Fragile / Transitioning / Non Fragile,V-Dem v14 (Excel PCA),02,Legacy no-RoL status (yields the 39 exits)
+IN_LEGACY_PANEL,index,0/1,legacy panel keys,02,"1 if the country-year was in the pre-Nov 2026 panel (excludes Bahrain 1971-2001, 3 PNG years)"
+WGI_INDEX,index,Excel 'Loading Factor 1 Normalized'; higher = LESS fragile,WGI (Excel PCA),03,"WGI fragility index (1996-2022; no 1997, 1999, 2001)"
+WGI_STATUS,index,Fragile / Transitioning / Non Fragile,WGI (Excel PCA),03,Annual status from WGI_INDEX
+WGI_INDEX_NORL,index,Excel 'Loading Factor 1 Normalized',WGI (Excel PCA),03,WGI index without rule of law
+WGI_STATUS_NORL,index,Fragile / Transitioning / Non Fragile,WGI (Excel PCA),03,Annual status from WGI_INDEX_NORL
+BOIX_DEMOCRACY,regime,0/1,BMR v4.0,11,"Democracy (Boix, Miller and Rosato); to 2020"
+BMR_DEMOCRATIZATION,regime,0/1,BMR v4.0,11,Transition to democracy in t
+BMR_BREAKDOWN,regime,0/1,BMR v4.0,11,Democratic breakdown in t
+BMR_ANY_TRANSITION,regime,0/1,BMR v4.0,11,Either transition in t
+BMR_DEMOCRATIZATION_RECENT5,regime,0/1,BMR v4.0,11,Democratization in t-4..t
+BMR_BREAKDOWN_RECENT5,regime,0/1,BMR v4.0,11,Breakdown in t-4..t
+BMR_ANY_TRANSITION_RECENT5,regime,0/1,BMR v4.0,11,"Any transition in t-4..t (Tables A17, A19)"
+ERT_DEMOCRATIZATION,regime,0/1,ERT v16,11,Democratic transition (reg_trans = 1) in t
+ERT_DEM_BREAKDOWN,regime,0/1,ERT v16,11,Autocratic transition (reg_trans = -1) in t
+ERT_ANY_TRANSITION,regime,0/1,ERT v16,11,Either regime transition in t
+ERT_AUT_EPISODE,regime,0/1,ERT v16,11,Country-year inside an autocratization episode
+ERT_AUT_ONSET,regime,0/1,ERT v16,11,First year of an autocratization episode
+ERT_DEM_EPISODE,regime,0/1,ERT v16,11,Country-year inside a democratization episode
+ERT_DEM_ONSET,regime,0/1,ERT v16,11,First year of a democratization episode
+ERT_DEMOCRATIZATION_RECENT5,regime,0/1,ERT v16,11,Democratic transition in t-4..t
+ERT_DEM_BREAKDOWN_RECENT5,regime,0/1,ERT v16,11,Autocratic transition in t-4..t
+ERT_ANY_TRANSITION_RECENT5,regime,0/1,ERT v16,11,Any regime transition in t-4..t
+ERT_AUT_ONSET_RECENT5,regime,0/1,ERT v16,11,Autocratization episode onset in t-4..t
+ERT_DEM_ONSET_RECENT5,regime,0/1,ERT v16,11,Democratization episode onset in t-4..t
+ELECTORAL_DEMOCRACY_SCORE,regime,0-1,V-Dem v16 v2x_polyarchy,11,Electoral democracy index (Figure 7)
+VDEM_REGIME_TYPE,regime,"0 closed aut., 1 electoral aut., 2 electoral dem., 3 liberal dem.",V-Dem v16 v2x_regime,11,Regimes of the World
+REGIME_DURABILITY_YEARS,regime,years,Polity5 durable,10,Years since the last regime change (3-point Polity shift); to 2018
+PARTIAL_DEMOCRACY_WITH_FACTIONALISM,regime,0/1,Polity5,10,exrec 6-8 and parcomp = 3 (Goldstone et al. 2010)
+POLITY2,regime,-10..10,Polity5 polity2,10,Combined Polity score (Figure 7 continuous measure)
+POLITY_DEMOCRACY_SCORE,regime,0-10; special codes missing,Polity5 democ,10,Institutionalized democracy
+POLITY_AUTOCRACY_SCORE,regime,0-10; special codes missing,Polity5 autoc,10,Institutionalized autocracy
+GWF_DEMOCRACY,regime,0/1,GWF 1.2,12,GWF democracy; to 2010
+GWF_PARTY,regime,0/1,GWF 1.2,12,Party-based autocracy incl. party-military / party-personal hybrids
+GWF_MILITARY,regime,0/1,GWF 1.2,12,Military autocracy incl. hybrids and indirect military
+GWF_PERSONALIST,regime,0/1,GWF 1.2,12,Personalist autocracy incl. hybrids
+FH_DEMOCRACY,regime,0/1,Freedom House FIW (frozen intermediate),13,1 if Free OR Partly Free
+DD_DEMOCRACY,regime,0/1,DD revisited (frozen intermediate),13,Cheibub-Gandhi-Vreeland democracy; to 2008
+REIGN_LEADER_CHANGE,leaders,0/1,REIGN (Aug 2021),14,New leader took office in t; NA from 2021
+REIGN_LEADER_CHANGE_RECENT3,leaders,0/1,REIGN (Aug 2021),14,Leader change in t-2..t
+REIGN_LEADER_CHANGE_RECENT5,leaders,0/1,REIGN (Aug 2021),14,Leader change in t-4..t
+REIGN_LEADER_MILITARY,leaders,0/1,REIGN (Aug 2021),14,Main leader of the year had a military career
+NAVCO_N_INCUMBENT_ONSET,mobilization,count,NAVCO 1.3,30,Onsets of maximalist campaigns with a regime-change goal (Table 4); to 2019
+NAVCO_ANY_INCUMBENT_ONSET,mobilization,0/1,NAVCO 1.3,30,Any such onset in t
+NAVCO_ANY_INCUMBENT_NONVIOLENT_ONSET,mobilization,0/1,NAVCO 1.3,30,Any nonviolent regime-change campaign onset in t
+NAVCO_ANY_INCUMBENT_VIOLENT_ONSET,mobilization,0/1,NAVCO 1.3,30,Any violent regime-change campaign onset in t
+NAVCO_ANY_INCUMBENT_ACTIVE,mobilization,0/1,NAVCO 1.3,30,Any regime-change campaign active in t
+NAVCO_ANY_INCUMBENT_ONSET_RECENT3,mobilization,0/1,NAVCO 1.3,30,Regime-change campaign onset in t-2..t
+WAR,conflict,0/1,UCDP/PRIO ACD v23.1,20,"Civil war (>= 1,000 deaths) on territory, or primary party to interstate conflict (>= 25)"
+WAR_3PLUS,conflict,0/1,UCDP/PRIO ACD v23.1,20,Third or later consecutive WAR year
+WAR_5PLUS,conflict,0/1,UCDP/PRIO ACD v23.1,20,Fifth or later consecutive WAR year
+WAR_RECENT3,conflict,0/1,UCDP/PRIO ACD v23.1,20,WAR in t-2..t
+WAR_RECENT5,conflict,0/1,UCDP/PRIO ACD v23.1,20,"WAR in t-4..t (Table 4 'war, preceding five years' after the 1-year lag)"
+WAR_SHORT,conflict,0/1,UCDP/PRIO ACD v23.1,21,War-level internal/extrasystemic conflict in its 1st-3rd consecutive year
+WAR_CHRONIC,conflict,0/1,UCDP/PRIO ACD v23.1,21,War-level conflict in its 4th+ consecutive year
+CONFLICT_ACTIVE,conflict,0/1,UCDP/PRIO ACD v23.1,21,Any internal or extrasystemic conflict (>= 25 deaths) active
+CONFLICT_INTENSITY_YEAR,conflict,0/1/2,UCDP/PRIO ACD v23.1,21,Max conflict intensity in the year
+CONFLICT_EPISODE_END_RECENT3,conflict,0/1,UCDP/PRIO ACD v23.1,21,A UCDP conflict episode ended in t-2..t
+POST_CONFLICT_5,conflict,0/1,UCDP/PRIO ACD v23.1,21,Episode ended in t-4..t and no conflict active in t
+UCDP_SUBSTANTIVE_COUNTRY_CESSATION_RECENT3,conflict,0/1,UCDP Conflict Termination v4-2024,22,"Intrastate episode ended by agreement/ceasefire/victory with no intrastate conflict the next year, in t-2..t (Table 4)"
+UCDP_SUBSTANTIVE_TERMINATION_RECENT3,conflict,0/1,UCDP Conflict Termination v4-2024,22,Intrastate episode ended by agreement/ceasefire/victory in t-2..t
+UCDP_PEACE_AGREEMENT_TERMINATION_RECENT3,conflict,0/1,UCDP Conflict Termination v4-2024,22,Episode ended by peace agreement in t-2..t
+UCDP_CEASEFIRE_TERMINATION_RECENT3,conflict,0/1,UCDP Conflict Termination v4-2024,22,Episode ended by ceasefire in t-2..t
+UCDP_VICTORY_TERMINATION_RECENT3,conflict,0/1,UCDP Conflict Termination v4-2024,22,Episode ended by government or non-state victory in t-2..t
+UCDP_NEGOTIATED_TERMINATION_RECENT3,conflict,0/1,UCDP Conflict Termination v4-2024,22,Episode ended by agreement or ceasefire in t-2..t
+N_TOTAL_TROOPS,external,count of states,UCDP/PRIO ACD v23.1,23,Distinct third-party states with troops in conflicts on the country's territory (Table 4)
+UN_PKO_PRESENT_ANY,external,0/1,UN DPO mission list,31,UN peacekeeping mission active in t
+UN_PKO_ONSET_RECENT3,external,0/1,UN DPO mission list,31,UN mission started in t-2..t (Table 4)
+UN_PKO_PRESENT_RECENT3,external,0/1,UN DPO mission list,31,UN mission active in any of t-2..t (the variable section 7.1 describes)
+GDP_PER_CAPITA,economy,constant 2015 US$,WDI NY.GDP.PCAP.KD,40,GDP per capita
+LOG_GDP_PER_CAPITA,economy,log,WDI,40,Log GDP per capita (Table 4)
+GDP_PER_CAPITA_GROWTH,economy,annual %,WDI NY.GDP.PCAP.KD.ZG,40,GDP per capita growth
+GDP_DEFLATOR,economy,annual %,WDI NY.GDP.DEFL.KD.ZG,40,"Inflation, GDP deflator (Table 4)"
+INFLATION_CRISIS,economy,0/1,WDI,40,Inflation above 40 percent
+ODA_PER_CAPITA,economy,current US$,WDI DT.ODA.ODAT.PC.ZS,40,Net ODA received per capita
+LOG_ODA_PER_CAPITA,economy,log; missing if <= 0,WDI,40,Log net ODA per capita (Table A16)
+STATE_CAPACITY,other,latent scale,Hanson and Sigman 2021,41,State capacity (Appendix C); to 2015
+STATE_CAPACITY_SD,other,SD,Hanson and Sigman 2021,41,Posterior SD of STATE_CAPACITY
+NEW_CONSTITUTION,other,0/1,CCP v6,32,New constitution promulgated in t
